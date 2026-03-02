@@ -1,95 +1,214 @@
 const path = require('path');
-const XLSX = require('xlsx'); // xlsx kütüphanesi
+const os = require('os');
+const fs = require('fs').promises;
+const { exec } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
+const xlsx = require('xlsx');
+
 const storageService = require('../services/storageService');
-const n8nService = require('../services/n8nService');
+
+/**
+ * Hermes PLV Order PDF metnini kurallara göre JSON formatına dönüştürür.
+ */
+function parseHermesPackingList(text) {
+    const lines = text.split('\n');
+    const products = [];
+
+    let currentPalletNo = null;
+
+    // KURAL 1: Gerçek Palet Numarası tespiti (4-5 Rakam + Boşluk + 18 Rakam SSCC Barkodu)
+    const palletHeaderRegex = /^\s*(\d{4,5})\s+\d{18}/;
+
+    // KURAL 2: Ürün Satırı Tespiti (Sadece harf veya tire içeren kodlar için de uyumlu)
+    const itemRegex = /^\s*(?:\d{3,6}\s+)?(?:\*\*\*\s+)?([A-Z0-9-]{4,15})\s+(.+)$/i;
+
+    for (let i = 0; i < lines.length; i++) {
+        const rawLine = lines[i];
+        const trimmedLine = rawLine.trim();
+
+        if (!trimmedLine) continue;
+
+        // ADIM 1: Satırda 18 haneli barkod var mı? Varsa bu bir Palet başlığıdır.
+        const headerMatch = trimmedLine.match(palletHeaderRegex);
+        if (headerMatch) {
+            currentPalletNo = headerMatch[1];
+            continue;
+        }
+
+        // ADIM 2: Bu bir Ürün Satırı mı?
+        const prodMatch = trimmedLine.match(itemRegex);
+        if (prodMatch) {
+            const itemNumber = prodMatch[1].toUpperCase();
+            const restOfLine = prodMatch[2].trim();
+
+            // --- SIKI GÜVENLİK FİLTRELERİ ---
+
+            // FİLTRE 1: KARA LİSTE (Blacklist)
+            // PDF içinde ürün koduymuş gibi davranan ama aslında başlık olan kelimeleri engeller.
+            const blacklist = [
+                "ACCOUNTING", "CUSTOMER", "ZONE", "DELIVERY", "PAGE", "PACKING",
+                "ORDER", "LOADING", "DOCUMENT", "FORWARDING", "COMPTOIR", "TOTAL",
+                "PALLETS", "PACKAGES", "ARCON"
+            ];
+            if (blacklist.includes(itemNumber)) continue;
+
+            // FİLTRE 2: 00017... ile başlayan "Document Number" değerlerini engeller.
+            if (itemNumber.startsWith('00017')) continue;
+
+            // FİLTRE 3: Sadece rakamlardan oluşan kodlarda 7 haneli ve daha uzunsa (Müşteri/Sipariş No) iptal et.
+            // 4-5 haneli olan GWP/Aksesuar numaralarına (örn: 40946) dokunmaz.
+            if (/^\d+$/.test(itemNumber) && itemNumber.length >= 7) continue;
+
+            // ---------------------------------
+
+            // ADIM 3: Açıklama ve Miktarı ayırmak için satırı sağdan sola oku
+            const parts = restOfLine.split(/\s+/);
+            let numTokens = [];
+            let j = parts.length - 1;
+
+            while (j >= 0) {
+                const token = parts[j];
+                // Sayı formatı (virgüllü, noktalı, tam sayı) VEYA tek bir harf
+                if (/^[\d.,]+$/.test(token) || /^[A-Za-z]$/.test(token)) {
+                    numTokens.unshift(token);
+                    j--;
+                } else {
+                    break;
+                }
+            }
+
+            // TEMİZLİK 1: En sondaki 'A' gibi gereksiz harfleri at
+            while (numTokens.length > 0 && /^[A-Za-z]$/.test(numTokens[numTokens.length - 1])) {
+                numTokens.pop();
+            }
+
+            // TEMİZLİK 2: En sondaki '1.60' gibi height verilerini at
+            while (numTokens.length > 0 && /^\d+\.\d{2}$/.test(numTokens[numTokens.length - 1])) {
+                numTokens.pop();
+            }
+
+            // TEMİZLİK 3 (AĞIRLIK İKİLİSİ): Brüt ve Net ağırlıklar virgülden sonra 3 hane barındıran ÇİFTLERDİR.
+            const weightRegex = /^\d+[.,]\d{3}$/;
+            if (numTokens.length >= 2) {
+                const last = numTokens[numTokens.length - 1];
+                const secLast = numTokens[numTokens.length - 2];
+                if (weightRegex.test(last) && weightRegex.test(secLast)) {
+                    numTokens.pop(); // Net Ağırlığı at
+                    numTokens.pop(); // Brüt Ağırlığı at
+                }
+            }
+
+            // MİKTAR (QUANTITY) BULMA: Kalan en son eleman KESİNLİKLE Quantity'dir.
+            let quantity = "";
+            if (numTokens.length > 0) {
+                let rawQty = numTokens.pop(); // Örn: "1,050" veya "63"
+                quantity = rawQty.replace(/[.,]/g, ''); // Sayıyı saf hale getirir
+            }
+
+            // Geriye kalan sayıları Description'ın sonuna iade et
+            const description = parts.slice(0, j + 1).concat(numTokens).join(" ");
+
+            // Sadece geçerli bir miktar (Quantity) bulunduysa listeye ekle
+            if (quantity) {
+                products.push({
+                    pallet_number: currentPalletNo,
+                    item_number: itemNumber,
+                    description: description,
+                    quantity: quantity
+                });
+            }
+        }
+    }
+
+    let lastValidPallet = null;
+    for (let p of products) {
+        if (p.pallet_number) lastValidPallet = p.pallet_number;
+        else if (lastValidPallet) p.pallet_number = lastValidPallet;
+    }
+
+    return products;
+}
 
 exports.convertPackingList = async (req, res) => {
+    let tempPdfPath = null;
+    let tempTxtPath = null;
+
     try {
         if (!req.file) {
             return res.status(400).json({ error: "Lütfen bir dosya yükleyin" });
         }
 
-        console.log("🚀 İşlem Başlıyor (Hermes - CSV Modu)...");
+        console.log("🚀 Hermes PDF İşlemi Başlıyor...");
         const originalName = req.file.originalname;
 
-        // 1. Dosyayı CDN'e yükle
-        const inputCdnUrl = await storageService.uploadToCDN(req.file.buffer, originalName);
+        console.log(`1. ${originalName} BunnyCDN'e yükleniyor...`);
+        const inputCdnUrl = await storageService.uploadToCDN(
+            req.file.buffer,
+            originalName
+        );
+        console.log("-> PDF Linki:", inputCdnUrl);
 
-        // 2. n8n'e gönder ve CSV Buffer sonucunu al
-        const n8nResponseBuffer = await n8nService.processFileWithN8N(inputCdnUrl);
+        console.log("2. PDF analiz için yerel diske hazırlanıyor...");
+        const tempFileName = `hermes_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+        tempPdfPath = path.join(os.tmpdir(), `${tempFileName}.pdf`);
+        tempTxtPath = path.join(os.tmpdir(), `${tempFileName}.txt`);
 
-        console.log("3. CSV okunuyor ve Excel formatlaması yapılıyor...");
+        await fs.writeFile(tempPdfPath, req.file.buffer);
 
-        // A) CSV Buffer'ı Workbook olarak oku
-        // raw: true -> Excel'in otomatik sayı çevirme (date parsing vb.) özelliklerini kapatır.
-        const workbook = XLSX.read(n8nResponseBuffer, { type: 'buffer', raw: true });
+        console.log("3. pdftotext ile PDF verileri metne dönüştürülüyor...");
+        await execPromise(`pdftotext -layout "${tempPdfPath}" "${tempTxtPath}"`);
 
-        const firstSheetName = workbook.SheetNames[0];
-        const worksheet = workbook.Sheets[firstSheetName];
+        console.log("4. Metin verileri analiz ediliyor...");
+        const pdfText = await fs.readFile(tempTxtPath, 'utf8');
+        const parsedJsonData = parseHermesPackingList(pdfText);
 
-        // B) Hücre Tiplerini Manuel Zorla
-        // CSV'de veri tipleri olmaz, hepsi "değer"dir. Biz burada tipleri atayacağız.
-        // Sütunlar: A: PALLET, B: ITEM, C: DESC, D: QTY
+        console.log("5. JSON verisi Excel (XLSX) formatına dönüştürülüyor...");
 
-        if (worksheet['!ref']) {
-            const range = XLSX.utils.decode_range(worksheet['!ref']);
+        const formattedDataForExcel = parsedJsonData.map(item => ({
+            "Pallet Number": item.pallet_number,
+            "Item Number": item.item_number,
+            "Description": item.description,
+            "Quantity": item.quantity
+        }));
 
-            const palletColIndex = 0;   // A Sütunu
-            const itemColIndex = 1;     // B Sütunu
-            const quantityColIndex = 3; // D Sütunu
+        const worksheet = xlsx.utils.json_to_sheet(formattedDataForExcel, {
+            header: ["Pallet Number", "Item Number", "Description", "Quantity"]
+        });
 
-            // Satırları gez (Başlık hariç: range.s.r + 1)
-            for (let R = range.s.r + 1; R <= range.e.r; ++R) {
+        const workbook = xlsx.utils.book_new();
+        xlsx.utils.book_append_sheet(workbook, worksheet, "Paket_Listesi");
 
-                // 1. PALLET_NUMBER (A Sütunu) -> Kesinlikle STRING
-                const palletAddr = XLSX.utils.encode_cell({ c: palletColIndex, r: R });
-                if (worksheet[palletAddr]) {
-                    worksheet[palletAddr].t = 's'; // Type: String (Metin)
-                    worksheet[palletAddr].v = String(worksheet[palletAddr].v).trim();
-                }
+        const excelBuffer = xlsx.write(workbook, { type: 'buffer', bookType: 'xlsx' });
 
-                // 2. ITEM_NUMBER (B Sütunu) -> Kesinlikle STRING
-                const itemAddr = XLSX.utils.encode_cell({ c: itemColIndex, r: R });
-                if (worksheet[itemAddr]) {
-                    worksheet[itemAddr].t = 's'; // Type: String (Metin)
-                    worksheet[itemAddr].v = String(worksheet[itemAddr].v).trim();
-                }
+        const outputFileName = `${path.parse(originalName).name}_analyzed.xlsx`;
+        console.log(`6. Sonuç dosyası (${outputFileName}) BunnyCDN'e yükleniyor...`);
 
-                // 3. DELIVERY_QUANTITY (D Sütunu) -> Kesinlikle NUMBER
-                const qtyAddr = XLSX.utils.encode_cell({ c: quantityColIndex, r: R });
-                if (worksheet[qtyAddr]) {
-                    // Temizlik: "1,050" gibi metin gelirse temizle
-                    const rawVal = worksheet[qtyAddr].v;
-                    const cleanVal = String(rawVal).replace(/[^0-9.]/g, '');
-
-                    if (cleanVal !== "" && !isNaN(cleanVal)) {
-                        worksheet[qtyAddr].t = 'n'; // Type: Number (Sayı)
-                        worksheet[qtyAddr].v = Number(cleanVal);
-                    }
-                }
-            }
-        }
-
-        // C) Excel (XLSX) Buffer'ı oluştur
-        const xlsxBuffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'buffer' });
-
-        const outputFileName = `${path.parse(originalName).name}_hermes_analyzed.xlsx`;
-        console.log(`4. Sonuç dosyası (${outputFileName}) BunnyCDN'e yükleniyor...`);
-
-        const outputCdnUrl = await storageService.uploadToCDN(xlsxBuffer, outputFileName);
-
-        console.log("-> İşlem Tamam! Excel Linki:", outputCdnUrl);
+        const outputCdnUrl = await storageService.uploadToCDN(
+            excelBuffer,
+            outputFileName
+        );
+        console.log("-> İşlem Tamam! XLSX Linki:", outputCdnUrl);
 
         res.status(200).json({
             success: true,
-            message: "Hermes CSV dönüşümü başarılı",
+            message: "Hermes PDF dönüştürme başarılı",
             input_url: inputCdnUrl,
             xlsx_url: outputCdnUrl,
-            file_name: outputFileName
+            file_name: outputFileName,
+            data: parsedJsonData
         });
 
     } catch (error) {
         console.error("❌ Controller Hatası:", error.message);
-        res.status(500).json({ success: false, error: error.message });
+        const errorMessage = error.response?.data?.message || error.message;
+
+        res.status(500).json({
+            success: false,
+            error: "İşlem sırasında bir hata oluştu: " + errorMessage
+        });
+    } finally {
+        if (tempPdfPath) await fs.unlink(tempPdfPath).catch(() => { });
+        if (tempTxtPath) await fs.unlink(tempTxtPath).catch(() => { });
     }
 };
