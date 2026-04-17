@@ -20,9 +20,8 @@ function parseHermesPackingList(text) {
     // KURAL 1: Gerçek Palet Numarası tespiti (4-5 Rakam + Boşluk + 18 Rakam SSCC Barkodu)
     const palletHeaderRegex = /^\s*(\d{4,5})\s+\d{18}/;
 
-    // KURAL 2: Ürün Satırı Tespiti (Sadece harf veya tire içeren kodlar için de uyumlu)
-    // KURAL 2: Ürün Satırı Tespiti (Harf, rakam, tire ve slash (/) içeren kodlar için uyumlu)
-const itemRegex = /^\s*(?:\d{3,6}\s+)?(?:\*\*\*\s+)?([A-Z0-9\-/]{4,15})\s+(.+)$/i;
+    // KURAL 2 GÜNCELLEMESİ: Baştaki opsiyonel rakamı da (eğer varsa) yakalamak için parantez içine alıyoruz: (\d{3,6})
+    const itemRegex = /^\s*(?:(\d{3,6})\s+)?(?:\*\*\*\s+)?([A-Z0-9\-/]{4,15})\s+(.+)$/i;
 
     for (let i = 0; i < lines.length; i++) {
         const rawLine = lines[i];
@@ -40,8 +39,17 @@ const itemRegex = /^\s*(?:\d{3,6}\s+)?(?:\*\*\*\s+)?([A-Z0-9\-/]{4,15})\s+(.+)$/
         // ADIM 2: Bu bir Ürün Satırı mı?
         const prodMatch = trimmedLine.match(itemRegex);
         if (prodMatch) {
-            const itemNumber = prodMatch[1].toUpperCase();
-            const restOfLine = prodMatch[2].trim();
+            let potentialSeq = prodMatch[1]; // Baştaki 3-6 haneli sayı (eğer eşleştiyse)
+            let itemNumber = prodMatch[2].toUpperCase();
+            let restOfLine = prodMatch[3].trim();
+
+            // --- HAYAT KURTARAN DÜZELTME (SHIFT FIX) ---
+            // Eğer regex baştaki 4-5 haneli ürün kodunu (örn: 40945) "sıra numarası" sanıp yuttuysa
+            // ve itemNumber olarak açıklamanın ilk kelimesini (örn: POUDRE) aldıysa bunu geri alıyoruz.
+            if (potentialSeq && /^[A-Z]+$/.test(itemNumber)) {
+                restOfLine = itemNumber + " " + restOfLine; // Kelimeyi description'a geri ver
+                itemNumber = potentialSeq; // Asıl item number'ı (40945) yerine koy
+            }
 
             // --- SIKI GÜVENLİK FİLTRELERİ ---
 
@@ -56,6 +64,7 @@ const itemRegex = /^\s*(?:\d{3,6}\s+)?(?:\*\*\*\s+)?([A-Z0-9\-/]{4,15})\s+(.+)$/
 
             // FİLTRE 2: 00017... ile başlayan "Document Number" değerlerini engeller.
             if (itemNumber.startsWith('00017')) continue;
+
             // FİLTRE 3: Sadece rakamlardan oluşan kodlarda 7 haneli ve daha uzunsa (Müşteri/Sipariş No) iptal et.
             // 4-5 haneli olan GWP/Aksesuar numaralarına (örn: 40946) dokunmaz.
             if (/^\d+$/.test(itemNumber) && itemNumber.length >= 7) continue;
@@ -87,7 +96,8 @@ const itemRegex = /^\s*(?:\d{3,6}\s+)?(?:\*\*\*\s+)?([A-Z0-9\-/]{4,15})\s+(.+)$/
             while (numTokens.length > 0 && /^\d+\.\d{2}$/.test(numTokens[numTokens.length - 1])) {
                 numTokens.pop();
             }
-           // TEMİZLİK 3 (AĞIRLIK İKİLİSİ): Brüt ve Net ağırlıklar virgülden sonra 3 hane barındıran ÇİFTLERDİR.
+
+            // TEMİZLİK 3 (AĞIRLIK İKİLİSİ): Brüt ve Net ağırlıklar virgülden sonra 3 hane barındıran ÇİFTLERDİR.
             const weightRegex = /^\d+[.,]\d{3}$/;
             if (numTokens.length >= 2) {
                 const last = numTokens[numTokens.length - 1];
@@ -128,6 +138,7 @@ const itemRegex = /^\s*(?:\d{3,6}\s+)?(?:\*\*\*\s+)?([A-Z0-9\-/]{4,15})\s+(.+)$/
 
     return products;
 }
+
 exports.convertPackingList = async (req, res) => {
     let tempPdfPath = null;
     let tempTxtPath = null;
@@ -210,5 +221,3 @@ exports.convertPackingList = async (req, res) => {
         if (tempTxtPath) await fs.unlink(tempTxtPath).catch(() => { });
     }
 };
-
-
