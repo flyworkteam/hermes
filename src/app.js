@@ -5,7 +5,7 @@ require('dotenv').config();
 const path = require('path');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = 3017;
 
 // --- 1. GÜÇLENDİRİLMİŞ CORS AYARLARI ---
 // Tarayıcının "Access-Control-Allow-Origin" hatasını engeller.
@@ -39,3 +39,4 @@ const server = app.listen(PORT, () => {
 server.timeout = 600000;
 server.keepAliveTimeout = 600000;
 server.headersTimeout = 605000; // keepAliveTimeout'tan biraz fazla olmalı
+
