@@ -21,7 +21,8 @@ function parseHermesPackingList(text) {
     const palletHeaderRegex = /^\s*(\d{4,5})\s+\d{18}/;
 
     // KURAL 2: Ürün Satırı Tespiti (Sadece harf veya tire içeren kodlar için de uyumlu)
-    const itemRegex = /^\s*(?:\d{3,6}\s+)?(?:\*\*\*\s+)?([A-Z0-9-]{4,15})\s+(.+)$/i;
+    // KURAL 2: Ürün Satırı Tespiti (Harf, rakam, tire ve slash (/) içeren kodlar için uyumlu)
+const itemRegex = /^\s*(?:\d{3,6}\s+)?(?:\*\*\*\s+)?([A-Z0-9\-/]{4,15})\s+(.+)$/i;
 
     for (let i = 0; i < lines.length; i++) {
         const rawLine = lines[i];
@@ -55,7 +56,6 @@ function parseHermesPackingList(text) {
 
             // FİLTRE 2: 00017... ile başlayan "Document Number" değerlerini engeller.
             if (itemNumber.startsWith('00017')) continue;
-
             // FİLTRE 3: Sadece rakamlardan oluşan kodlarda 7 haneli ve daha uzunsa (Müşteri/Sipariş No) iptal et.
             // 4-5 haneli olan GWP/Aksesuar numaralarına (örn: 40946) dokunmaz.
             if (/^\d+$/.test(itemNumber) && itemNumber.length >= 7) continue;
@@ -87,8 +87,7 @@ function parseHermesPackingList(text) {
             while (numTokens.length > 0 && /^\d+\.\d{2}$/.test(numTokens[numTokens.length - 1])) {
                 numTokens.pop();
             }
-
-            // TEMİZLİK 3 (AĞIRLIK İKİLİSİ): Brüt ve Net ağırlıklar virgülden sonra 3 hane barındıran ÇİFTLERDİR.
+           // TEMİZLİK 3 (AĞIRLIK İKİLİSİ): Brüt ve Net ağırlıklar virgülden sonra 3 hane barındıran ÇİFTLERDİR.
             const weightRegex = /^\d+[.,]\d{3}$/;
             if (numTokens.length >= 2) {
                 const last = numTokens[numTokens.length - 1];
@@ -129,7 +128,6 @@ function parseHermesPackingList(text) {
 
     return products;
 }
-
 exports.convertPackingList = async (req, res) => {
     let tempPdfPath = null;
     let tempTxtPath = null;
@@ -212,3 +210,5 @@ exports.convertPackingList = async (req, res) => {
         if (tempTxtPath) await fs.unlink(tempTxtPath).catch(() => { });
     }
 };
+
+
