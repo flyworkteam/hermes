@@ -54,7 +54,6 @@ function parseHermesPackingList(text) {
             // --- SIKI GÜVENLİK FİLTRELERİ ---
 
             // FİLTRE 1: KARA LİSTE (Blacklist)
-            // PDF içinde ürün koduymuş gibi davranan ama aslında başlık olan kelimeleri engeller.
             const blacklist = [
                 "ACCOUNTING", "CUSTOMER", "ZONE", "DELIVERY", "PAGE", "PACKING",
                 "ORDER", "LOADING", "DOCUMENT", "FORWARDING", "COMPTOIR", "TOTAL",
@@ -66,7 +65,6 @@ function parseHermesPackingList(text) {
             if (itemNumber.startsWith('00017')) continue;
 
             // FİLTRE 3: Sadece rakamlardan oluşan kodlarda 7 haneli ve daha uzunsa (Müşteri/Sipariş No) iptal et.
-            // 4-5 haneli olan GWP/Aksesuar numaralarına (örn: 40946) dokunmaz.
             if (/^\d+$/.test(itemNumber) && itemNumber.length >= 7) continue;
 
             // ---------------------------------
@@ -99,12 +97,14 @@ function parseHermesPackingList(text) {
 
             // TEMİZLİK 3 (AĞIRLIK İKİLİSİ): Brüt ve Net ağırlıklar virgülden sonra 3 hane barındıran ÇİFTLERDİR.
             const weightRegex = /^\d+[.,]\d{3}$/;
+            let hasWeights = false; // <-- Ağırlık olup olmadığını takip ediyoruz
             if (numTokens.length >= 2) {
                 const last = numTokens[numTokens.length - 1];
                 const secLast = numTokens[numTokens.length - 2];
                 if (weightRegex.test(last) && weightRegex.test(secLast)) {
                     numTokens.pop(); // Net Ağırlığı at
                     numTokens.pop(); // Brüt Ağırlığı at
+                    hasWeights = true; // <-- Ağırlık bulduk, koli sayısı da vardır
                 }
             }
 
@@ -113,6 +113,12 @@ function parseHermesPackingList(text) {
             if (numTokens.length > 0) {
                 let rawQty = numTokens.pop(); // Örn: "1,050" veya "63"
                 quantity = rawQty.replace(/[.,]/g, ''); // Sayıyı saf hale getirir
+            }
+
+            // TEMİZLİK 4 (KOLİ SAYISI DÜZELTMESİ)
+            // Eğer ağırlık varsa, Quantity'den önce Koli Adedi (örn: "1") kalmıştır, onu da çöpe at.
+            if (hasWeights && numTokens.length > 0) {
+                numTokens.pop();
             }
 
             // Geriye kalan sayıları Description'ın sonuna iade et
