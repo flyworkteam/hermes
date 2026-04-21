@@ -39,4 +39,3 @@ const server = app.listen(PORT, () => {
 server.timeout = 600000;
 server.keepAliveTimeout = 600000;
 server.headersTimeout = 605000; // keepAliveTimeout'tan biraz fazla olmalı
-
