@@ -20,7 +20,8 @@ function parseHermesPackingList(text) {
     // KURAL 1: Gerçek Palet Numarası tespiti (4-5 Rakam + Boşluk + 18 Rakam SSCC Barkodu)
     const palletHeaderRegex = /^\s*(\d{4,5})\s+\d{18}/;
 
-    // KURAL 2 GÜNCELLEMESİ: Baştaki opsiyonel rakamı da (eğer varsa) yakalamak için parantez içine alıyoruz: (\d{3,6})
+    // KURAL 2: Ürün Satırı Tespiti (Sadece harf veya tire içeren kodlar için de uyumlu)
+    // KURAL 2: Ürün Satırı Tespiti (Harf, rakam, tire ve slash (/) içeren kodlar için uyumlu)
     const itemRegex = /^\s*(?:(\d{3,6})\s+)?(?:\*\*\*\s+)?([A-Z0-9\-/]{4,15})\s+(.+)$/i;
 
     for (let i = 0; i < lines.length; i++) {
@@ -38,22 +39,22 @@ function parseHermesPackingList(text) {
 
         // ADIM 2: Bu bir Ürün Satırı mı?
         const prodMatch = trimmedLine.match(itemRegex);
-        if (prodMatch) {
-            let potentialSeq = prodMatch[1]; // Baştaki 3-6 haneli sayı (eğer eşleştiyse)
-            let itemNumber = prodMatch[2].toUpperCase();
-            let restOfLine = prodMatch[3].trim();
+         if (prodMatch) {
+         let potentialSeq = prodMatch[1]; // Regex'in yeni yakaladığı baştaki 3-6 haneli sayı
+         let itemNumber = prodMatch[2].toUpperCase(); // İndeks 2 oldu
+         let restOfLine = prodMatch[3].trim(); // İndeks 3 oldu
 
-            // --- HAYAT KURTARAN DÜZELTME (SHIFT FIX) ---
-            // Eğer regex baştaki 4-5 haneli ürün kodunu (örn: 40945) "sıra numarası" sanıp yuttuysa
-            // ve itemNumber olarak açıklamanın ilk kelimesini (örn: POUDRE) aldıysa bunu geri alıyoruz.
-            if (potentialSeq && /^[A-Z]+$/.test(itemNumber)) {
-                restOfLine = itemNumber + " " + restOfLine; // Kelimeyi description'a geri ver
-                itemNumber = potentialSeq; // Asıl item number'ı (40945) yerine koy
+         // --- HAYAT KURTARAN DÜZELTME (SHIFT FIX) ---
+         // Eğer baştaki sayı (örn: 40945) yakalandıysa ve itemNumber sadece harflerden oluşuyorsa (örn: EAU),
+         // demek ki regex yanlış yeri kopardı. Onları asıl yerlerine geri koyuyoruz.
+         if (potentialSeq && /^[A-Z]+$/.test(itemNumber)) {
+                restOfLine = itemNumber + " " + restOfLine; 
+                itemNumber = potentialSeq; 
             }
-
-            // --- SIKI GÜVENLİK FİLTRELERİ ---
+           // --- SIKI GÜVENLİK FİLTRELERİ ---
 
             // FİLTRE 1: KARA LİSTE (Blacklist)
+            // PDF içinde ürün koduymuş gibi davranan ama aslında başlık olan kelimeleri engeller.
             const blacklist = [
                 "ACCOUNTING", "CUSTOMER", "ZONE", "DELIVERY", "PAGE", "PACKING",
                 "ORDER", "LOADING", "DOCUMENT", "FORWARDING", "COMPTOIR", "TOTAL",
@@ -65,6 +66,7 @@ function parseHermesPackingList(text) {
             if (itemNumber.startsWith('00017')) continue;
 
             // FİLTRE 3: Sadece rakamlardan oluşan kodlarda 7 haneli ve daha uzunsa (Müşteri/Sipariş No) iptal et.
+            // 4-5 haneli olan GWP/Aksesuar numaralarına (örn: 40946) dokunmaz.
             if (/^\d+$/.test(itemNumber) && itemNumber.length >= 7) continue;
 
             // ---------------------------------
@@ -97,14 +99,14 @@ function parseHermesPackingList(text) {
 
             // TEMİZLİK 3 (AĞIRLIK İKİLİSİ): Brüt ve Net ağırlıklar virgülden sonra 3 hane barındıran ÇİFTLERDİR.
             const weightRegex = /^\d+[.,]\d{3}$/;
-            let hasWeights = false; // <-- Ağırlık olup olmadığını takip ediyoruz
+            let hasWeights = false; // <-- YENİ: Ağırlık olup olmadığını takip etmek için değişken ekledim
             if (numTokens.length >= 2) {
                 const last = numTokens[numTokens.length - 1];
                 const secLast = numTokens[numTokens.length - 2];
                 if (weightRegex.test(last) && weightRegex.test(secLast)) {
                     numTokens.pop(); // Net Ağırlığı at
                     numTokens.pop(); // Brüt Ağırlığı at
-                    hasWeights = true; // <-- Ağırlık bulduk, koli sayısı da vardır
+                    hasWeights = true; // <-- YENİ: Ağırlıkları bulup sildiğimizi işaretledim
                 }
             }
 
@@ -115,10 +117,10 @@ function parseHermesPackingList(text) {
                 quantity = rawQty.replace(/[.,]/g, ''); // Sayıyı saf hale getirir
             }
 
-            // TEMİZLİK 4 (KOLİ SAYISI DÜZELTMESİ)
+            // TEMİZLİK 4 (KOLİ SAYISI DÜZELTMESİ) <-- YENİ BLOK
             // Eğer ağırlık varsa, Quantity'den önce Koli Adedi (örn: "1") kalmıştır, onu da çöpe at.
             if (hasWeights && numTokens.length > 0) {
-                numTokens.pop();
+                numTokens.pop(); // <-- YENİ: Açıklamaya yapışan 1'i listeden çıkaran satır
             }
 
             // Geriye kalan sayıları Description'ın sonuna iade et
@@ -137,14 +139,13 @@ function parseHermesPackingList(text) {
     }
 
     let lastValidPallet = null;
-    for (let p of products) {
+        for (let p of products) {
         if (p.pallet_number) lastValidPallet = p.pallet_number;
         else if (lastValidPallet) p.pallet_number = lastValidPallet;
     }
 
     return products;
 }
-
 exports.convertPackingList = async (req, res) => {
     let tempPdfPath = null;
     let tempTxtPath = null;
