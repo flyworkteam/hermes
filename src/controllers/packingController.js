@@ -74,9 +74,9 @@ function parseHermesPackingList(text) {
             }
 
             // --- SIKI GÜVENLİK FİLTRELERİ ---
+            if (/^\d{2}\/\d{2}\/\d{4}$/.test(itemNumber)) continue;
 
             // FİLTRE 1: KARA LİSTE (Blacklist)
-            // PDF içinde ürün koduymuş gibi davranan ama aslında başlık olan kelimeleri engeller.
             const blacklist = [
                 "ACCOUNTING", "CUSTOMER", "ZONE", "DELIVERY", "PAGE", "PACKING",
                 "ORDER", "LOADING", "DOCUMENT", "FORWARDING", "COMPTOIR", "TOTAL",
