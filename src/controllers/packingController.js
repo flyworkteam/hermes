@@ -20,7 +20,6 @@ function parseHermesPackingList(text) {
     // KURAL 1: Gerçek Palet Numarası tespiti (4-5 Rakam + Boşluk + 18 Rakam SSCC Barkodu)
     const palletHeaderRegex = /^\s*(\d{4,5})\s+\d{18}/;
 
-    // KURAL 2: Ürün Satırı Tespiti (Sadece harf veya tire içeren kodlar için de uyumlu)
     // KURAL 2: Ürün Satırı Tespiti (Harf, rakam, tire ve slash (/) içeren kodlar için uyumlu)
     const itemRegex = /^\s*(?:(\d{3,6})\s+)?(?:\*\*\*\s+)?([A-Z0-9\-/]{4,15})\s+(.+)$/i;
 
@@ -39,19 +38,42 @@ function parseHermesPackingList(text) {
 
         // ADIM 2: Bu bir Ürün Satırı mı?
         const prodMatch = trimmedLine.match(itemRegex);
-         if (prodMatch) {
-         let potentialSeq = prodMatch[1]; // Regex'in yeni yakaladığı baştaki 3-6 haneli sayı
-         let itemNumber = prodMatch[2].toUpperCase(); // İndeks 2 oldu
-         let restOfLine = prodMatch[3].trim(); // İndeks 3 oldu
+        if (prodMatch) {
+            let potentialSeq = prodMatch[1]; // Regex'in yeni yakaladığı baştaki 3-6 haneli sayı
+            let itemNumber = prodMatch[2].toUpperCase(); // İndeks 2 oldu
+            let restOfLine = prodMatch[3].trim(); // İndeks 3 oldu
 
-         // --- HAYAT KURTARAN DÜZELTME (SHIFT FIX) ---
-         // Eğer baştaki sayı (örn: 40945) yakalandıysa ve itemNumber sadece harflerden oluşuyorsa (örn: EAU),
-         // demek ki regex yanlış yeri kopardı. Onları asıl yerlerine geri koyuyoruz.
-         if (potentialSeq && /^[A-Z]+$/.test(itemNumber)) {
-                restOfLine = itemNumber + " " + restOfLine; 
-                itemNumber = potentialSeq; 
+            // --- HAYAT KURTARAN DÜZELTME (SHIFT FIX) ---
+            // "SACPM" gibi tamamen harflerden oluşan gerçek ürün kodlarının çöpe gitmesini engeller.
+            const validAlphaCodes = ["SACPM"];
+
+            // Eğer baştaki sayı yakalandıysa, itemNumber sadece harfse VE bu harfler istisna listesinde YOKSA yer değiştir:
+            if (potentialSeq && /^[A-Z]+$/.test(itemNumber) && !validAlphaCodes.includes(itemNumber)) {
+                restOfLine = itemNumber + " " + restOfLine;
+                itemNumber = potentialSeq;
             }
-           // --- SIKI GÜVENLİK FİLTRELERİ ---
+
+            // --- YAPIŞIK KELİME DÜZELTMESİ (GLUED TEXT FIX) ---
+            // pdftotext aradaki boşluğu yuttuğunda ürün kodu ve açıklamanın ilk kelimesi birleşir 
+            // Örn: "607610VOANMOPLA" -> Aslında kod "607610VOANMO" ve açıklama başı "PLA"
+            const gluedKeywords = [
+                "PLA", "TDH", "EDT", "EDP", "DEO", "H24", "BRN",
+                "ALL", "JST", "ADM", "COH", "IST", "RGH", "EDM",
+                "TWI", "ECN", "JSN", "ODM", "JML", "SET", "KIT"
+            ];
+
+            for (const keyword of gluedKeywords) {
+                // itemNumber bu kelimelerden biriyle bitiyorsa ve geriye kalan kısım 
+                // makul bir ürün kodu uzunluğundaysa (en az 5-6 karakter kalıyorsa)
+                if (itemNumber.endsWith(keyword) && itemNumber.length > (keyword.length + 5)) {
+                    const actualItemNumber = itemNumber.slice(0, -keyword.length); // Son kısımdaki kelimeyi kes
+                    restOfLine = keyword + " " + restOfLine; // Kelimeyi description'ın başına geri koy
+                    itemNumber = actualItemNumber; // Temizlenmiş ürün kodunu güncelle
+                    break; // Düzeltme yapıldı, döngüyü durdur
+                }
+            }
+
+            // --- SIKI GÜVENLİK FİLTRELERİ ---
 
             // FİLTRE 1: KARA LİSTE (Blacklist)
             // PDF içinde ürün koduymuş gibi davranan ama aslında başlık olan kelimeleri engeller.
@@ -99,14 +121,14 @@ function parseHermesPackingList(text) {
 
             // TEMİZLİK 3 (AĞIRLIK İKİLİSİ): Brüt ve Net ağırlıklar virgülden sonra 3 hane barındıran ÇİFTLERDİR.
             const weightRegex = /^\d+[.,]\d{3}$/;
-            let hasWeights = false; // <-- YENİ: Ağırlık olup olmadığını takip etmek için değişken ekledim
+            let hasWeights = false; // Ağırlık olup olmadığını takip etmek için
             if (numTokens.length >= 2) {
                 const last = numTokens[numTokens.length - 1];
                 const secLast = numTokens[numTokens.length - 2];
                 if (weightRegex.test(last) && weightRegex.test(secLast)) {
                     numTokens.pop(); // Net Ağırlığı at
                     numTokens.pop(); // Brüt Ağırlığı at
-                    hasWeights = true; // <-- YENİ: Ağırlıkları bulup sildiğimizi işaretledim
+                    hasWeights = true; // Ağırlıkları bulup sildiğimizi işaretledim
                 }
             }
 
@@ -117,10 +139,10 @@ function parseHermesPackingList(text) {
                 quantity = rawQty.replace(/[.,]/g, ''); // Sayıyı saf hale getirir
             }
 
-            // TEMİZLİK 4 (KOLİ SAYISI DÜZELTMESİ) <-- YENİ BLOK
+            // TEMİZLİK 4 (KOLİ SAYISI DÜZELTMESİ)
             // Eğer ağırlık varsa, Quantity'den önce Koli Adedi (örn: "1") kalmıştır, onu da çöpe at.
             if (hasWeights && numTokens.length > 0) {
-                numTokens.pop(); // <-- YENİ: Açıklamaya yapışan 1'i listeden çıkaran satır
+                numTokens.pop(); // Açıklamaya yapışan 1'i listeden çıkaran satır
             }
 
             // Geriye kalan sayıları Description'ın sonuna iade et
@@ -139,13 +161,14 @@ function parseHermesPackingList(text) {
     }
 
     let lastValidPallet = null;
-        for (let p of products) {
+    for (let p of products) {
         if (p.pallet_number) lastValidPallet = p.pallet_number;
         else if (lastValidPallet) p.pallet_number = lastValidPallet;
     }
 
     return products;
 }
+
 exports.convertPackingList = async (req, res) => {
     let tempPdfPath = null;
     let tempTxtPath = null;
