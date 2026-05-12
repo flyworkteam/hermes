@@ -5,7 +5,7 @@ require('dotenv').config();
 const path = require('path');
 
 const app = express();
-const PORT = 3017;
+const PORT = 3029;
 
 // --- 1. GÜÇLENDİRİLMİŞ CORS AYARLARI ---
 // Tarayıcının "Access-Control-Allow-Origin" hatasını engeller.
